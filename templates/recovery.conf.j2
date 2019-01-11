@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+
+standby_mode = 'on'
+archive_cleanup_command = 'pg_archivecleanup {{ postgresql_datavg_mountpoint_prefix }}/archive/{{ pg_instance.name }} %r'
+trigger_file = '{{ postgresql_role_transition_pgdata_pg_instance }}/{{ postgresql_role_transition_switchover_trigger_file }}'
+{% if pg_instance.ha_config is defined and pg_instance.ha_config.standby_config is defined and pg_instance.ha_config.standby_config.recovery_conf is defined %}
+{%   for k,v in pg_instance.ha_config.standby_config.recovery_conf.items()|sort %}
+{{ k }} = {{ v }}
+{%   endfor %}
+{% endif %}
+

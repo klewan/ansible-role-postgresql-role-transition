@@ -1,0 +1,132 @@
+---
+
+- name: standby | check whether the primary status for this standby is 'in production'
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+  register: postgresql_role_transition_primary_server_state
+  delegate_to: '{{ pg_instance.ha_config.standby_config.primary_ansible_inventory_hostname }}'
+  when: pg_instance.ha_config.standby_config.primary_ansible_inventory_hostname is defined
+  tags:
+    - postgresql_role_transition_standby_primary_server_state
+
+- name: standby | debug | the primary status
+  debug:
+    msg: "{{ postgresql_role_transition_primary_server_state.stdout }}"
+  when: postgresql_role_transition_debug_info and postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined
+  tags:
+    - postgresql_role_transition_standby_primary_server_state
+
+- name: standby | check whether Postgres instance is up and running
+  stat:
+    path: "{{ postgresql_role_transition_pgdata_pg_instance }}/postmaster.pid"
+  register: postgresql_role_transition_check_status
+  tags:
+    - postgresql_role_transition_standby_check_status
+
+- name: standby | debug | postmaster.pid existence
+  debug:
+    msg: "{{ postgresql_role_transition_check_status.stat.exists }}"
+  when: postgresql_role_transition_debug_info and postgresql_role_transition_check_status.stat is defined  
+  tags:
+    - postgresql_role_transition_standby_check_status
+
+- name: standby | check if recovery.conf file is present
+  stat:
+    path: "{{ postgresql_role_transition_pgdata_pg_instance }}/recovery.conf"
+  register: postgresql_role_transition_recovery_conf_stat
+  tags:
+    - postgresql_role_transition_standby_recovery_conf_stat
+
+- name: standby | debug | recovery.conf existence
+  debug:
+    msg: "{{ postgresql_role_transition_recovery_conf_stat.stat.exists }}"
+  when: postgresql_role_transition_debug_info and postgresql_role_transition_recovery_conf_stat.stat is defined
+  tags:
+    - postgresql_role_transition_standby_recovery_conf_stat
+
+- name: standby | check database cluster state (production / archive recovery)
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+  register: postgresql_role_transition_standby_server_state
+  tags:
+    - postgresql_role_transition_standby_server_state
+
+- name: standby | debug | the standby status
+  debug:
+    msg: "{{ postgresql_role_transition_standby_server_state.stdout }}"
+  when: postgresql_role_transition_debug_info and postgresql_role_transition_standby_server_state is defined and postgresql_role_transition_standby_server_state.stdout is defined
+  tags:
+    - postgresql_role_transition_standby_server_state
+
+- name: standby | stop postgres server before switching to standby
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_ctl -D {{ postgresql_role_transition_pgdata_pg_instance }} stop
+    echo 0
+  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') )
+  tags:
+    - postgresql_role_transition_standby_stop_server
+
+- name: standby | synchronize a PGDATA data directory with primary data directory (pg_rewind)
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_rewind --target-pgdata={{ postgresql_role_transition_pgdata_pg_instance }} --source-server="{{ pg_instance.ha_config.standby_config.pg_rewind_source_server }}"
+  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and not postgresql_role_transition_recovery_conf_stat.stat.exists) )
+  tags:
+    - postgresql_role_transition_standby_synchronize_server
+
+#- name: standby | configure recovery.conf config file
+#  template:
+#    src: recovery.conf.j2
+#    dest: "{{ postgresql_role_transition_pgdata_pg_instance }}/recovery.conf"
+#    owner: "{{ postgresql_user }}"
+#    group: "{{ postgresql_group }}"
+#    mode: 0640
+#    backup: yes
+#  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and not postgresql_role_transition_recovery_conf_stat.stat.exists) )
+#  tags:
+#    - postgresql_role_transition_standby_configure_recovery_conf
+
+- name: standby | set up config files (from postgresql-instance/config_files.yml role)
+  import_role:
+    name: postgresql-instance
+    tasks_from: config_files.yml
+  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and not postgresql_role_transition_recovery_conf_stat.stat.exists) )
+  tags:
+    - postgresql_role_transition_standby_config_files
+
+- name: standby | start postgres server after switching to standby
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_ctl -D {{ postgresql_role_transition_pgdata_pg_instance }} start
+    echo 0
+  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and not postgresql_role_transition_recovery_conf_stat.stat.exists) )
+  tags:
+    - postgresql_role_transition_standby_start_server
+
+- name: standby | wait until the new standby server is 'in archive recovery' state
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+  when: postgresql_role_transition_primary_server_state is defined and postgresql_role_transition_primary_server_state.stdout is defined and postgresql_role_transition_primary_server_state.stdout == 'in production' and ( (postgresql_role_transition_standby_server_state.stdout is defined and postgresql_role_transition_standby_server_state.stdout == 'in production') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and not postgresql_role_transition_recovery_conf_stat.stat.exists) )
+  register: postgresql_role_transition_cluster_state_after_transition
+  until: postgresql_role_transition_cluster_state_after_transition.stdout is defined and postgresql_role_transition_cluster_state_after_transition.stdout == 'in archive recovery'
+  retries: 9
+  delay: 10
+  tags:
+    - postgresql_role_transition_standby_wait_for_standby
+

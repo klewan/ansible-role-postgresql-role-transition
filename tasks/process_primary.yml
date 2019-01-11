@@ -1,0 +1,90 @@
+---
+
+- name: primary | check whether Postgres instance is up and running
+  stat:
+    path: "{{ postgresql_role_transition_pgdata_pg_instance }}/postmaster.pid"
+  register: postgresql_role_transition_check_status
+  tags:
+    - postgresql_role_transition_check_status
+
+# either:
+#   pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+#   in archive recovery
+#   in production
+# or
+#   SELECT pg_is_in_recovery()
+#   t
+#   f
+
+- name: primary | check if recovery.conf file is present
+  stat:
+    path: "{{ postgresql_role_transition_pgdata_pg_instance }}/recovery.conf"
+  register: postgresql_role_transition_recovery_conf_stat
+  tags:
+    - postgresql_role_transition_recovery_conf_stat
+
+- name: primary | check database cluster state (production / archive recovery)
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+#    {{ postgresql_env_pgoptions }} {{ postgresql_role_transition_pghome_pg_instance }}/bin/psql -v ON_ERROR_STOP=0 -X -q -t -d postgres -c "SELECT pg_is_in_recovery()" 2>/dev/null | head -1 | sed 's/^ *//'
+  register: postgresql_role_transition_cluster_state
+  tags:
+    - postgresql_role_transition_cluster_state
+
+# either:
+#   postgresql_role_transition_cluster_state.stdout == 'in archive recovery'
+# or
+#   postgresql_role_transition_cluster_state.stdout == 't'
+
+- name: primary | promote a standby to be a new primary server (switchover trigger file) - when the standby is up and running
+  file:
+    path: "{{ postgresql_role_transition_pgdata_pg_instance }}/{{ postgresql_role_transition_switchover_trigger_file }}"
+    state: touch
+    mode: 0664
+  when: postgresql_role_transition_cluster_state.stdout is defined and postgresql_role_transition_cluster_state.stdout == 'in archive recovery'
+  tags:
+    - postgresql_role_transition_promote_standby
+    - postgresql_role_transition_promote_standby_trigger_file
+
+- name: primary | promote a standby to be a new primary server (pg_ctl promote) - when the standby is shut down
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_ctl -D {{ postgresql_role_transition_pgdata_pg_instance }} promote
+  when: postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and postgresql_role_transition_recovery_conf_stat.stat.exists
+  tags:
+    - postgresql_role_transition_promote_standby
+    - postgresql_role_transition_promote_standby_pg_ctl_promote
+
+- name: primary | wait until the new primary server is 'in production' state
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_role_transition_pghome_pg_instance }}/bin/pg_controldata 2>/dev/null | grep "Database cluster state" | cut -d: -f2 | sed 's/^ *//'
+  when: (postgresql_role_transition_cluster_state.stdout is defined and postgresql_role_transition_cluster_state.stdout == 'in archive recovery') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and postgresql_role_transition_recovery_conf_stat.stat.exists)
+  register: postgresql_role_transition_cluster_state_after_transition
+  until: postgresql_role_transition_cluster_state_after_transition.stdout is defined and postgresql_role_transition_cluster_state_after_transition.stdout == 'in production'
+  retries: 9
+  delay: 10
+  tags:
+    - postgresql_role_transition_wait_for_production
+
+- name: primary | create replication slots
+  shell: |
+    export PGDATA={{ postgresql_role_transition_pgdata_pg_instance }}
+    export PGHOME={{ postgresql_role_transition_pghome_pg_instance }}
+    export PGPORT={{ pg_instance.port }}
+    {{ postgresql_env_pgoptions }} {{ postgresql_role_transition_pghome_pg_instance }}/bin/psql -v ON_ERROR_STOP=0 -X -q -t -d postgres -c "SELECT * FROM pg_create_physical_replication_slot('{{ item }}')"
+  with_items:
+    - "{{ postgresql_role_transition_replication_slots|default([],true) }}"
+  loop_control:
+    label: "[instance: {{ pg_instance.name }}, replication slot: {{ item }}]"
+  when: (postgresql_role_transition_cluster_state.stdout is defined and postgresql_role_transition_cluster_state.stdout == 'in archive recovery') or (postgresql_role_transition_check_status.stat is defined and not postgresql_role_transition_check_status.stat.exists and postgresql_role_transition_recovery_conf_stat.stat is defined and postgresql_role_transition_recovery_conf_stat.stat.exists)
+  tags:
+    - postgresql_role_transition_create_replication_slots
+

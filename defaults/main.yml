@@ -1,0 +1,7 @@
+---
+
+postgresql_role_transition_switchover_trigger_file: "{{ postgresql_switchover_trigger_file | default('switchover.trigger.file',true) }}"
+
+# display debug info
+postgresql_role_transition_debug_info: true
+

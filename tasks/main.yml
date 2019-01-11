@@ -1,0 +1,24 @@
+---
+
+- name: execute tasks for a primary server
+  include: process_primary.yml pg_instance={{ outer_item }}
+  with_items:
+    - "{{ postgresql_clusters }}"
+  loop_control:
+    label: "[instnace: {{ outer_item.name }}]"
+    loop_var: outer_item
+  when: outer_item.state == 'present' and outer_item.ha_config is defined and outer_item.ha_config.role|default('primary',true) == 'primary' and outer_item.ha_config.primary_config is defined
+  tags:
+    - postgresql_role_transition_process_primary
+
+- name: execute tasks for a standby server
+  include: process_standby.yml pg_instance={{ outer_item }}
+  with_items:
+    - "{{ postgresql_clusters }}"
+  loop_control:
+    label: "[instnace: {{ outer_item.name }}]"
+    loop_var: outer_item
+  when: outer_item.state == 'present' and outer_item.ha_config is defined and outer_item.ha_config.role|default('primary',true) == 'standby' and outer_item.ha_config.standby_config is defined
+  tags:
+    - postgresql_role_transition_process_standby
+
