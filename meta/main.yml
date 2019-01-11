@@ -19,5 +19,5 @@ galaxy_info:
   - failover
 
 dependencies:
-  - { role: postgresql }
+  - { role: klewan.postgresql }
 
